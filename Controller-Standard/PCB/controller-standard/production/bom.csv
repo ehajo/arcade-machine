@@ -1,0 +1,6 @@
+﻿Designator,Footprint,Quantity,Value,LCSC Part #
+"A1, B1, DOWN1, LEFT1, RIGHT1, UP1, X1, Y1",SW_PUSH_6mm_H5mm,8,SW_Push,
+"C1, C2, C3, C4, C5, C6, C7, C8",0805,8,100nF,
+D1,LED_D3.0mm,1,rot,
+R1,R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal,1,120R,
+U1,MODULE_ESP32-C3_SUPERMINI_SMD,1,ESP32-C3_SUPERMINI_TH,
