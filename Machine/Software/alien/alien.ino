@@ -5,12 +5,68 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <esp_system.h>
+#include <esp_mac.h>
 #include <string.h>
 
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_NeoPixel.h>
+
+// ====================== eHaJo ESPNOW PROTOKOLL (v1) ======================
+#define EH_MAGIC0 'E'
+#define EH_MAGIC1 'H'
+#define EH_MAGIC2 'J'
+#define EH_MAGIC3 '1'
+#define EH_VER    1
+
+enum EhMsgType : uint8_t {
+  EH_HELLO   = 1,
+  EH_OFFER   = 2,
+  EH_CONFIRM = 3
+};
+
+struct __attribute__((packed)) EhHello {
+  uint8_t magic[4];
+  uint8_t ver;
+  uint8_t type;
+  uint16_t nonce;
+  uint8_t crc8;
+};
+
+struct __attribute__((packed)) EhOffer {
+  uint8_t magic[4];
+  uint8_t ver;
+  uint8_t type;
+  uint16_t nonce;
+  uint8_t ctrlMac[6];
+  uint8_t crc8;
+};
+
+struct __attribute__((packed)) EhConfirm {
+  uint8_t magic[4];
+  uint8_t ver;
+  uint8_t type;
+  uint16_t nonce;
+  uint8_t crc8;
+};
+
+static uint8_t crc8_xor(const uint8_t* d, int n) {
+  uint8_t c = 0;
+  for (int i=0;i<n;i++) c ^= d[i];
+  return c;
+}
+
+static bool eh_magic_ok(const uint8_t* m) {
+  return (m[0]==EH_MAGIC0 && m[1]==EH_MAGIC1 && m[2]==EH_MAGIC2 && m[3]==EH_MAGIC3);
+}
+
+static void wifiTweak() {
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  esp_wifi_set_max_tx_power(78);
+  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+}
 
 // -------------------- PINS (wie bei euch) --------------------
 #define SCREEN_WIDTH 128
@@ -67,16 +123,74 @@ static void addPeer(const uint8_t mac[6], int channel /*0=current*/) {
   memcpy(p.peer_addr, mac, 6);
   p.encrypt = false;
   p.channel = channel;
+  p.ifidx = WIFI_IF_STA;
+  esp_now_del_peer(mac);
   esp_now_add_peer(&p);
 }
 
+// Pairing State (Protokoll v1)
+static uint8_t g_lastHelloMac[6] = {0};
+static uint16_t g_lastNonce = 0;
+static uint32_t g_lastOfferMs = 0;
+
+// Auto-Pairing nach Boot
+static uint32_t g_autoPairUntil = 0;
+
 void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
-  // ACK vom Controller beendet Pairing sofort
-  if (g_pairing && len == 5 && memcmp(data, "eHaJo", 5) == 0) {
-    g_pairing = false;
-    return;
+  // ===== Pairing-Protokoll (v1) =====
+  if (g_pairing) {
+    // EhHello und EhConfirm sind beide 9 Bytes -> anhand type unterscheiden
+    if (len == (int)sizeof(EhHello)) {
+      uint8_t msgType = data[5]; // type-Feld ist in beiden Structs an Byte 5
+
+      if (msgType == EH_HELLO) {
+        EhHello h; memcpy(&h, data, sizeof(h));
+        if (eh_magic_ok(h.magic) && h.ver == EH_VER) {
+          uint8_t c = crc8_xor((const uint8_t*)&h, sizeof(h) - 1);
+          if (c == h.crc8) {
+            memcpy(g_lastHelloMac, info->src_addr, 6);
+            g_lastNonce = h.nonce;
+            Serial.printf("[PAIR] HELLO from %02X:%02X:%02X:%02X:%02X:%02X nonce=%u\n",
+                          info->src_addr[0],info->src_addr[1],info->src_addr[2],
+                          info->src_addr[3],info->src_addr[4],info->src_addr[5],
+                          (unsigned)h.nonce);
+
+            uint32_t now = millis();
+            if (now - g_lastOfferMs > 100) {
+              g_lastOfferMs = now;
+              EhOffer o = {};
+              o.magic[0]=EH_MAGIC0; o.magic[1]=EH_MAGIC1; o.magic[2]=EH_MAGIC2; o.magic[3]=EH_MAGIC3;
+              o.ver = EH_VER;
+              o.type = EH_OFFER;
+              o.nonce = h.nonce;
+              memcpy(o.ctrlMac, info->src_addr, 6);
+              o.crc8 = crc8_xor((const uint8_t*)&o, sizeof(o) - 1);
+
+              addPeer(info->src_addr, 0);
+              esp_err_t r = esp_now_send(info->src_addr, (const uint8_t*)&o, sizeof(o));
+              Serial.printf("[PAIR] OFFER send result: %d\n", (int)r);
+            }
+          }
+        }
+      } else if (msgType == EH_CONFIRM) {
+        EhConfirm cfm; memcpy(&cfm, data, sizeof(cfm));
+        if (eh_magic_ok(cfm.magic) && cfm.ver == EH_VER) {
+          uint8_t c = crc8_xor((const uint8_t*)&cfm, sizeof(cfm) - 1);
+          if (c == cfm.crc8) {
+            if (g_lastNonce != 0 && cfm.nonce == g_lastNonce) {
+              addPeer(info->src_addr, 0);
+              ctrlPeerAdded = true;
+              g_pairing = false;
+              Serial.println("[PAIR] CONFIRM received -> paired!");
+            }
+          }
+        }
+      }
+      return;
+    }
   }
 
+  // ===== Controller-Paket =====
   if (len == (int)sizeof(CtrlPacket)) {
     CtrlPacket pkt; memcpy(&pkt, data, sizeof(pkt));
     if (crc8_simple((const uint8_t*)&pkt, sizeof(pkt) - 1) == pkt.crc8) {
@@ -626,28 +740,29 @@ static void updateLeds(uint32_t now){
 static uint32_t pairPressStart = 0;
 
 static void startPairing() {
+  Serial.println("[ARCADE] Pairing START");
   g_pairing = true;
   g_pairStart = millis();
   g_sendErr = 999;
 
   forceChannel1();
-  addPeer(BCAST, 0);
+  addPeer(BCAST, 1);
 
   ctrlPeerAdded = false;
 }
 
 static void pairingLoop() {
   uint32_t now = millis();
+
   if (now - g_pairStart > PAIR_TIMEOUT_MS) {
     g_pairing = false;
+    Serial.println("[ARCADE] Pairing TIMEOUT");
     return;
   }
 
   forceChannel1();
 
-  const char* msg = "eHaJo";
-  g_sendErr = (int)esp_now_send(BCAST, (uint8_t*)msg, 5);
-
+  // OLED Pairing-Anzeige
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -660,7 +775,9 @@ static void pairingLoop() {
   display.setCursor(0, 24); display.print(macStr);
 
   display.setCursor(0, 38); display.print("CH: 1");
-  display.setCursor(0, 52); display.print("S:"); display.print(g_sendErr);
+
+  display.setCursor(0, 52); display.print("HELLO:");
+  if (g_lastNonce != 0) display.print("Y"); else display.print("N");
   display.display();
 
   strip.clear();
@@ -668,7 +785,7 @@ static void pairingLoop() {
     strip.setPixelColor(k, ((now/200)%2) ? strip.Color(40,40,0) : strip.Color(0,0,0));
   strip.show();
 
-  delay(80);
+  delay(30);
 }
 
 // ====================== SETUP/LOOP ======================
@@ -687,11 +804,15 @@ void setup(){
   pinMode(MASTER_PAIR_PIN, INPUT_PULLUP);
   randomSeed((uint32_t)esp_random());
 
-  // --- tennis-style wireless init ---
+  // --- wireless init (wie Tennis) ---
   WiFi.mode(WIFI_STA);
-  delay(20);
-  WiFi.macAddress(g_mac);
+  WiFi.disconnect(true);
+  WiFi.setAutoReconnect(false);
+  wifiTweak();
 
+  esp_read_mac(g_mac, ESP_MAC_WIFI_STA);
+  Serial.printf("[ARCADE] STA MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
+    g_mac[0],g_mac[1],g_mac[2],g_mac[3],g_mac[4],g_mac[5]);
   forceChannel1();
 
   if (esp_now_init() != ESP_OK) {
@@ -703,6 +824,9 @@ void setup(){
   }
   esp_now_register_recv_cb(onDataRecv);
 
+  Serial.println("[ARCADE] Alien Angriff master boot");
+  g_autoPairUntil = millis() + 20000; // 20s Auto-Pair Fenster nach Boot
+
   gs.mode = MODE_IDLE;
   resetBullets();
   resetAliens();
@@ -711,6 +835,11 @@ void setup(){
 
 void loop(){
   uint32_t now = millis();
+
+  // Auto-Pairing kurz nach Boot, solange noch kein Controller aktiv ist
+  if (!ctrlPeerAdded && !g_pairing && (g_autoPairUntil != 0) && (now < g_autoPairUntil)) {
+    startPairing();
+  }
 
   // Long press -> Pairing Mode (Arcade)
   if (digitalRead(MASTER_PAIR_PIN) == LOW) {

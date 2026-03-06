@@ -1,62 +1,13 @@
 #include <Arduino.h>
 #include <stdint.h>
-#include <WiFi.h>
-#include <esp_now.h>
-#include <esp_wifi.h>
-#include <esp_system.h>
-#include <esp_mac.h>
 #include <string.h>
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_NeoPixel.h>
-// ====================== eHaJo ESPNOW PROTOKOLL (v1) ======================
-#define EH_MAGIC0 'E'
-#define EH_MAGIC1 'H'
-#define EH_MAGIC2 'J'
-#define EH_MAGIC3 '1'
-#define EH_VER    1
 
-enum EhMsgType : uint8_t {
-  EH_HELLO   = 1,
-  EH_OFFER   = 2,
-  EH_CONFIRM = 3
-};
-
-struct __attribute__((packed)) EhHello {
-  uint8_t magic[4];
-  uint8_t ver;
-  uint8_t type;
-  uint16_t nonce;
-  uint8_t crc8;
-};
-
-struct __attribute__((packed)) EhOffer {
-  uint8_t magic[4];
-  uint8_t ver;
-  uint8_t type;
-  uint16_t nonce;
-  uint8_t ctrlMac[6];
-  uint8_t crc8;
-};
-
-struct __attribute__((packed)) EhConfirm {
-  uint8_t magic[4];
-  uint8_t ver;
-  uint8_t type;
-  uint16_t nonce;
-  uint8_t crc8;
-};
-
-static uint8_t crc8_xor(const uint8_t* d, int n) {
-  uint8_t c = 0;
-  for (int i=0;i<n;i++) c ^= d[i];
-  return c;
-}
-
-static bool eh_magic_ok(const uint8_t* m) {
-  return (m[0]==EH_MAGIC0 && m[1]==EH_MAGIC1 && m[2]==EH_MAGIC2 && m[3]==EH_MAGIC3);
-}
+// ====================== ESP-NOW / PAIRING ======================
+#include "ehajo_master.h"
 
 // ====================== HARDWARE PINS ======================
 #define SCREEN_WIDTH 128
@@ -75,76 +26,9 @@ static bool eh_magic_ok(const uint8_t* m) {
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, OLED_DC, OLED_RST, OLED_CS);
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
-// ====================== ESP-NOW / PAIRING ======================
-static const uint8_t WIFI_CH = 1;
-
-static void wifiTweak() {
-  esp_wifi_set_ps(WIFI_PS_NONE);
-  esp_wifi_set_max_tx_power(78);
-  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
-  esp_wifi_set_protocol(WIFI_IF_AP,  WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
-}
-
-static const uint32_t PAIR_LONGPRESS_MS = 1500;
-static const uint32_t PAIR_TIMEOUT_MS   = 60000;
-
-static uint8_t BCAST[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-static uint8_t g_mac[6] = {0};
-
-static bool     g_pairing = false;
-static uint32_t g_pairStart = 0;
-static int      g_sendErr = 999;
-
-static bool     ctrlPeerAdded = false;
-
-// Auto-Pairing nach Boot (damit Pairing ohne Master-Button klappt)
-static uint32_t g_autoPairUntil = 0;
-
-// Long-Press-Erkennung (Master Pair Pin)
-static uint32_t pairPressStart = 0;
-
-static void forceChannel1() {
-  esp_wifi_set_channel(WIFI_CH, WIFI_SECOND_CHAN_NONE);
-}
-
-static void addPeer(const uint8_t mac[6], int channel) {
-  esp_now_peer_info_t p = {};
-  memcpy(p.peer_addr, mac, 6);
-  p.encrypt = false;
-  p.channel = channel;  // direkt übergeben, 0 = aktueller Channel
-  p.ifidx = WIFI_IF_STA;
-  esp_now_del_peer(mac);
-  esp_now_add_peer(&p);
-}
-
-static void startPairing() {
-  Serial.println("[ARCADE] Pairing START");
-  g_pairing = true;
-  g_pairStart = millis();
-  g_sendErr = 999;
-
-  forceChannel1();
-  addPeer(BCAST, 1);
-
-  ctrlPeerAdded = false;
-}
-
-static uint8_t g_lastHelloMac[6] = {0};
-static uint16_t g_lastNonce = 0;
-static uint32_t g_lastOfferMs = 0;
-
-static void pairingLoop() {
-  uint32_t now = millis();
-
-  if (now - g_pairStart > PAIR_TIMEOUT_MS) {
-    g_pairing = false;
-    Serial.println("[ARCADE] Pairing TIMEOUT");
-    return;
-  }
-
-  forceChannel1();
-
-  // OLED / LEDs anzeigen (wie gehabt)
+// ====================== Pairing Display Callback ======================
+// Wird von pairingLoop() in ehajo_master.h aufgerufen
+static void pairingDisplay(uint32_t now) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -156,19 +40,19 @@ static void pairingLoop() {
   display.setCursor(0, 14); display.print("MAC:");
   display.setCursor(0, 24); display.print(macStr);
 
-  display.setCursor(0, 38); display.print("CH: 1");
-
-  display.setCursor(0, 52); display.print("HELLO:");
-  if (g_lastNonce != 0) display.print("Y"); else display.print("N");
+  display.setCursor(0, 38); display.print("Waiting for Ctrl...");
   display.display();
 
   strip.clear();
   for (int k=0;k<NUM_LEDS;k++)
     strip.setPixelColor(k, ((now/200)%2) ? strip.Color(40,40,0) : strip.Color(0,0,0));
   strip.show();
-
-  delay(30);
 }
+
+static const uint32_t PAIR_LONGPRESS_MS = 1500;
+
+// Long-Press-Erkennung (Master Pair Pin)
+static uint32_t pairPressStart = 0;
 
 // --- Spiel-Konfiguration ---
 static const int TOP_UI_H = 12;
@@ -194,18 +78,13 @@ struct GameState {
 };
 GameState gs;
 
-struct CtrlPacket { uint32_t seq; uint16_t p1, p2; uint8_t buttons, crc8; };
-
-volatile uint16_t g_rxP1 = 2048, g_rxP2 = 2048;
-volatile uint8_t g_rxButtons = 0;
-
 // ====================== LED FUNKTIONEN ======================
 void setAllLeds(uint32_t color) {
   for(int i=0; i<NUM_LEDS; i++) strip.setPixelColor(i, color);
   // strip.show() wird vom Aufrufer gemacht, um Doppelaufrufe zu vermeiden
 }
 
-// Hilfsfunktion für Regenbogenfarben
+// Hilfsfunktion fuer Regenbogenfarben
 uint32_t Wheel(byte WheelPos) {
   WheelPos = 255 - WheelPos;
   if (WheelPos < 85) {
@@ -257,84 +136,6 @@ void updateLeds(uint32_t now) {
 }
 
 // ====================== GAME LOGIC ======================
-uint8_t crc8_simple(const uint8_t* d, size_t n) {
-  uint8_t c = 0; for (size_t i = 0; i < n; i++) c ^= d[i]; return c;
-}
-
-void onDataRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
-  // ===== Pairing-Protokoll (v1) =====
-  if (g_pairing) {
-    // EhHello und EhConfirm sind beide 9 Bytes gross -> anhand type unterscheiden
-    if (len == (int)sizeof(EhHello)) {
-      uint8_t msgType = data[5]; // type-Feld ist in beiden Structs an Byte 5
-
-      if (msgType == EH_HELLO) {
-        EhHello h; memcpy(&h, data, sizeof(h));
-        if (eh_magic_ok(h.magic) && h.ver == EH_VER) {
-          uint8_t c = crc8_xor((const uint8_t*)&h, sizeof(h) - 1);
-          if (c == h.crc8) {
-            memcpy(g_lastHelloMac, info->src_addr, 6);
-            g_lastNonce = h.nonce;
-            Serial.print("[PAIR] HELLO from ");
-            Serial.printf("%02X:%02X:%02X:%02X:%02X:%02X nonce=%u\n",
-                          info->src_addr[0],info->src_addr[1],info->src_addr[2],
-                          info->src_addr[3],info->src_addr[4],info->src_addr[5],
-                          (unsigned)h.nonce);
-
-            uint32_t now = millis();
-            if (now - g_lastOfferMs > 100) {
-              g_lastOfferMs = now;
-              EhOffer o = {};
-              o.magic[0]=EH_MAGIC0; o.magic[1]=EH_MAGIC1; o.magic[2]=EH_MAGIC2; o.magic[3]=EH_MAGIC3;
-              o.ver = EH_VER;
-              o.type = EH_OFFER;
-              o.nonce = h.nonce;
-              memcpy(o.ctrlMac, info->src_addr, 6);
-              o.crc8 = crc8_xor((const uint8_t*)&o, sizeof(o) - 1);
-
-              // Immer Unicast: Peer hinzufügen und direkt an src_addr senden
-              addPeer(info->src_addr, 0);
-              esp_err_t r = esp_now_send(info->src_addr, (const uint8_t*)&o, sizeof(o));
-              Serial.print("[PAIR] OFFER send result: "); Serial.println((int)r);
-            }
-          }
-        }
-      } else if (msgType == EH_CONFIRM) {
-        EhConfirm cfm; memcpy(&cfm, data, sizeof(cfm));
-        if (eh_magic_ok(cfm.magic) && cfm.ver == EH_VER) {
-          uint8_t c = crc8_xor((const uint8_t*)&cfm, sizeof(cfm) - 1);
-          if (c == cfm.crc8) {
-            if (g_lastNonce != 0 && cfm.nonce == g_lastNonce) {
-              addPeer(info->src_addr, 0);
-              ctrlPeerAdded = true;
-              g_pairing = false;
-              Serial.println("[PAIR] CONFIRM received -> paired!");
-            }
-          }
-        }
-      }
-      return;
-    }
-  }
-
-  // ===== Controller-Paket =====
-  if (len == (int)sizeof(CtrlPacket)) {
-    CtrlPacket pkt; memcpy(&pkt, data, sizeof(pkt));
-    if (crc8_simple((const uint8_t*)&pkt, sizeof(pkt) - 1) == pkt.crc8) {
-
-      // beim ersten gültigen Paket: Peer für Controller hinzufügen (C3 robust)
-      if (!ctrlPeerAdded) {
-        ctrlPeerAdded = true;
-        addPeer(info->src_addr, 0);
-      }
-
-      g_rxP1 = pkt.p1;
-      g_rxP2 = pkt.p2;
-      g_rxButtons = pkt.buttons;
-    }
-  }
-}
-
 void initParticles(bool leftSide) {
   for(int i=0; i<20; i++) {
     particles[i].active = true;
@@ -380,18 +181,20 @@ void setup() {
 
   display.setTextColor(SSD1306_WHITE);
 
-  // STA-Mode (robuster fuer ESP-NOW auf ESP32-C3)
+  // STA-Mode (funktioniert fuer Empfang auf Machine)
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true);
+  WiFi.disconnect(false, true);
   WiFi.setAutoReconnect(false);
+  WiFi.setSleep(false);
+  delay(500);
+
   wifiTweak();
-  esp_wifi_set_ps(WIFI_PS_NONE);
 
   // --- wireless init ---
   esp_read_mac(g_mac, ESP_MAC_WIFI_STA);
   Serial.printf("[ARCADE] STA MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
     g_mac[0],g_mac[1],g_mac[2],g_mac[3],g_mac[4],g_mac[5]);
-  forceChannel1();
+  Serial.printf("[ARCADE] WiFi.status=%d mode=%d\n", (int)WiFi.status(), (int)WiFi.getMode());
 
   if (esp_now_init() != ESP_OK) {
     display.clearDisplay();
@@ -400,6 +203,10 @@ void setup() {
     display.display();
     while(true){ delay(1000); }
   }
+  Serial.println("[ARCADE] ESP-NOW init OK");
+
+  // Channel NACH esp_now_init setzen
+  forceChannel1();
 
   esp_now_register_recv_cb(onDataRecv);
   Serial.println("[ARCADE] Tennis master boot");
