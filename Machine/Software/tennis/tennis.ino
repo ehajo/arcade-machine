@@ -5,6 +5,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_NeoPixel.h>
+#include <math.h>
 
 // ====================== ESP-NOW / PAIRING ======================
 #include "ehajo_master.h"
@@ -271,20 +272,43 @@ void loop() {
 
       if (gs.ballVX < 0 && gs.ballX <= PADDLE_XL + PADDLE_W + BALL_R) {
         if (gs.ballY >= targetYL && gs.ballY <= targetYL + PADDLE_H) {
-          gs.ballVX *= -1.08f; gs.ballVY = ((gs.ballY - targetYL) / (float)PADDLE_H - 0.5f) * 4.0f;
+          gs.ballVX *= -1.08f;
+          gs.ballVY = ((gs.ballY - targetYL) / (float)PADDLE_H - 0.5f) * 4.0f;
           gs.ballX = PADDLE_XL + PADDLE_W + BALL_R + 1;
+
+          // Sonderfall: Ball klebt am oberen/unteren Rand und fliegt fast gerade
+          if ((gs.ballY <= FIELD_Y0 + BALL_R + 1 || gs.ballY >= SCREEN_HEIGHT - BALL_R - 1) &&
+              fabs(gs.ballVY) < 0.20f) {
+            gs.ballVY = (random(0, 2) == 0) ? -0.9f : 0.9f;
+          }
         } else if (gs.ballX < 0) {
-          gs.scoreR++; resetBall(true);
-          if (gs.scoreR >= SCORE_TO_WIN) { gs.mode = MODE_GAMEOVER; initParticles(false); }
+          gs.scoreR++;
+          resetBall(true);
+          if (gs.scoreR >= SCORE_TO_WIN) {
+            gs.mode = MODE_GAMEOVER;
+            initParticles(false);
+          }
         }
       }
+
       if (gs.ballVX > 0 && gs.ballX >= PADDLE_XR - BALL_R) {
         if (gs.ballY >= targetYR && gs.ballY <= targetYR + PADDLE_H) {
-          gs.ballVX *= -1.08f; gs.ballVY = ((gs.ballY - targetYR) / (float)PADDLE_H - 0.5f) * 4.0f;
+          gs.ballVX *= -1.08f;
+          gs.ballVY = ((gs.ballY - targetYR) / (float)PADDLE_H - 0.5f) * 4.0f;
           gs.ballX = PADDLE_XR - BALL_R - 1;
+
+          // Sonderfall: Ball klebt am oberen/unteren Rand und fliegt fast gerade
+          if ((gs.ballY <= FIELD_Y0 + BALL_R + 1 || gs.ballY >= SCREEN_HEIGHT - BALL_R - 1) &&
+              fabs(gs.ballVY) < 0.20f) {
+            gs.ballVY = (random(0, 2) == 0) ? -0.9f : 0.9f;
+          }
         } else if (gs.ballX > SCREEN_WIDTH) {
-          gs.scoreL++; resetBall(false);
-          if (gs.scoreL >= SCORE_TO_WIN) { gs.mode = MODE_GAMEOVER; initParticles(true); }
+          gs.scoreL++;
+          resetBall(false);
+          if (gs.scoreL >= SCORE_TO_WIN) {
+            gs.mode = MODE_GAMEOVER;
+            initParticles(true);
+          }
         }
       }
     }
