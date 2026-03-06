@@ -24,9 +24,155 @@
 
 #define LED_PIN    7
 #define NUM_LEDS   4
+#define BUZZER_PIN  20
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, OLED_DC, OLED_RST, OLED_CS);
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// ====================== SOUND (non-blocking, ESP32 Core 3.x) ======================
+static const int      BUZZER_RES_BITS = 10;
+static const uint32_t BUZZER_INIT_HZ  = 2000;
+static const uint8_t  BUZZER_VOL_MAX  = 235;
+static const uint8_t  BUZZER_VOL_MID  = 190;
+static const uint8_t  BUZZER_VOL_LOW  = 130;
+
+struct ToneStep {
+  uint16_t hz;
+  uint16_t ms;
+  uint8_t  vol;
+};
+
+enum SfxId : uint8_t {
+  SFX_NONE = 0,
+  SFX_SHOOT,
+  SFX_ALIEN_HIT,
+  SFX_PLAYER_HIT,
+  SFX_LEVEL_CLEAR,
+  SFX_GAME_OVER,
+  SFX_WIN
+};
+
+static const ToneStep SND_SHOOT[] = {
+  {2800, 10, BUZZER_VOL_MAX},
+  {1800, 22, BUZZER_VOL_MID},
+  { 900, 18, BUZZER_VOL_LOW},
+};
+
+static const ToneStep SND_ALIEN_HIT[] = {
+  {1800, 18, BUZZER_VOL_MAX},
+  {1300, 18, BUZZER_VOL_MID},
+  { 900, 22, BUZZER_VOL_LOW},
+};
+
+static const ToneStep SND_PLAYER_HIT[] = {
+  { 420, 60, BUZZER_VOL_MAX},
+  { 260, 90, BUZZER_VOL_MID},
+  { 120, 90, BUZZER_VOL_LOW},
+};
+
+static const ToneStep SND_LEVEL_CLEAR[] = {
+  { 784, 60, BUZZER_VOL_MID},
+  { 988, 60, BUZZER_VOL_MID},
+  {1319, 80, BUZZER_VOL_MAX},
+  {1568, 120, BUZZER_VOL_MAX},
+};
+
+static const ToneStep SND_GAME_OVER[] = {
+  { 659, 90, BUZZER_VOL_MID},
+  { 494, 90, BUZZER_VOL_MID},
+  { 330, 130, BUZZER_VOL_MID},
+  { 196, 180, BUZZER_VOL_LOW},
+};
+
+static const ToneStep SND_WIN[] = {
+  {1046, 60, BUZZER_VOL_MAX},
+  {1319, 60, BUZZER_VOL_MAX},
+  {1568, 60, BUZZER_VOL_MAX},
+  {2093, 160, BUZZER_VOL_MAX},
+};
+
+struct SoundState {
+  const ToneStep* seq = nullptr;
+  uint8_t len = 0;
+  uint8_t idx = 0;
+  bool active = false;
+  uint32_t stepUntil = 0;
+} snd;
+
+static void attachBuzzerOnce() {
+  static bool attached = false;
+  if (attached) return;
+
+  int ch = ledcAttach(BUZZER_PIN, BUZZER_INIT_HZ, BUZZER_RES_BITS);
+  Serial.printf("[AUDIO] ledcAttach() -> channel=%d\n", ch);
+  if (ch < 0) {
+    Serial.println("[AUDIO] ERROR: LEDC attach failed");
+    return;
+  }
+  ledcWrite(BUZZER_PIN, 0);
+  attached = true;
+}
+
+static inline void buzzerOff() {
+  ledcWrite(BUZZER_PIN, 0);
+}
+
+static inline void buzzerOn(uint32_t hz, uint8_t vol) {
+  if (hz < 20) hz = 20;
+  ledcWriteTone(BUZZER_PIN, hz);
+
+  uint32_t maxDuty = (1UL << BUZZER_RES_BITS) - 1;
+  uint32_t duty = (uint32_t)((vol / 255.0f) * maxDuty);
+  ledcWrite(BUZZER_PIN, duty);
+}
+
+static void playSfx(const ToneStep* seq, uint8_t len) {
+  if (!seq || len == 0) {
+    snd.active = false;
+    snd.seq = nullptr;
+    snd.len = 0;
+    snd.idx = 0;
+    snd.stepUntil = 0;
+    buzzerOff();
+    return;
+  }
+
+  snd.seq = seq;
+  snd.len = len;
+  snd.idx = 0;
+  snd.active = true;
+  snd.stepUntil = 0;
+}
+
+static void playSfxId(SfxId id) {
+  switch (id) {
+    case SFX_SHOOT:       playSfx(SND_SHOOT,       sizeof(SND_SHOOT) / sizeof(SND_SHOOT[0])); break;
+    case SFX_ALIEN_HIT:   playSfx(SND_ALIEN_HIT,   sizeof(SND_ALIEN_HIT) / sizeof(SND_ALIEN_HIT[0])); break;
+    case SFX_PLAYER_HIT:  playSfx(SND_PLAYER_HIT,  sizeof(SND_PLAYER_HIT) / sizeof(SND_PLAYER_HIT[0])); break;
+    case SFX_LEVEL_CLEAR: playSfx(SND_LEVEL_CLEAR, sizeof(SND_LEVEL_CLEAR) / sizeof(SND_LEVEL_CLEAR[0])); break;
+    case SFX_GAME_OVER:   playSfx(SND_GAME_OVER,   sizeof(SND_GAME_OVER) / sizeof(SND_GAME_OVER[0])); break;
+    case SFX_WIN:         playSfx(SND_WIN,         sizeof(SND_WIN) / sizeof(SND_WIN[0])); break;
+    default:              buzzerOff(); snd.active = false; break;
+  }
+}
+
+static void updateSound(uint32_t now) {
+  if (!snd.active || !snd.seq || snd.len == 0) return;
+
+  if (snd.stepUntil != 0 && now < snd.stepUntil) return;
+
+  if (snd.idx >= snd.len) {
+    snd.active = false;
+    buzzerOff();
+    return;
+  }
+
+  const ToneStep &s = snd.seq[snd.idx++];
+  if (s.hz == 0 || s.vol == 0) buzzerOff();
+  else buzzerOn(s.hz, s.vol);
+
+  snd.stepUntil = now + s.ms;
+}
 
 // ====================== Pairing Display Callback ======================
 // Wird von pairingLoop() in ehajo_master.h aufgerufen
@@ -238,6 +384,7 @@ static void startWin(uint32_t now){
   g_nextWinTick = now;
   g_nextBurstMs = now;
   spawnBurst();
+  playSfxId(SFX_WIN);
 }
 
 static void spawnBullet(int16_t x,int16_t y,int8_t vy,bool fromPlayer){
@@ -284,6 +431,7 @@ static void updateAliens(uint32_t now){
       startWin(now);
       return;
     }
+    playSfxId(SFX_LEVEL_CLEAR);
     // Level geschafft -> naechstes Level
     resetAliens();
 
@@ -341,6 +489,7 @@ static void updateBullets(uint32_t now){
             aliens[r][c].alive=false;
             bullets[i].active=false;
             gs.score += 10;
+            playSfxId(SFX_ALIEN_HIT);
 
             int alive = aliveAliensCount();
             if(alive>0){
@@ -358,7 +507,12 @@ static void updateBullets(uint32_t now){
         gs.hitFlashUntil=now+300;
         gs.shipX=(SCREEN_WIDTH-SHIP_W)/2;
 
-        if(gs.lives <= 0) gs.mode=MODE_GAMEOVER;
+        if(gs.lives <= 0){
+          gs.mode=MODE_GAMEOVER;
+          playSfxId(SFX_GAME_OVER);
+        } else {
+          playSfxId(SFX_PLAYER_HIT);
+        }
       }
     }
   }
@@ -394,6 +548,7 @@ static void handleShooting(uint32_t now){
     gs.nextPlayerShot = now + 240;
     // Langsam: -1 pro Bullet-Tick
     spawnBullet(gs.shipX + SHIP_W/2, gs.shipY - 2, -1, true);
+    playSfxId(SFX_SHOOT);
   }
 
   // Enemy shots
@@ -592,6 +747,7 @@ void setup(){
 
   pinMode(MASTER_PAIR_PIN, INPUT_PULLUP);
   randomSeed((uint32_t)esp_random());
+  attachBuzzerOnce();
 
   // --- STA-Mode (funktioniert fuer Empfang auf Machine) ---
   WiFi.mode(WIFI_STA);
@@ -632,6 +788,7 @@ void setup(){
 
 void loop(){
   uint32_t now = millis();
+  updateSound(now);
 
   // Auto-Pairing kurz nach Boot, solange noch kein Controller aktiv ist
   if (!ctrlPeerAdded && !g_pairing && (g_autoPairUntil != 0) && (now < g_autoPairUntil)) {
