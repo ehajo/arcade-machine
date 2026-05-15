@@ -834,6 +834,7 @@ void setup(){
   SPI.begin(OLED_CLK, -1, OLED_MOSI, OLED_CS);
   display.begin(SSD1306_SWITCHCAPVCC);
   display.setTextColor(SSD1306_WHITE);
+  display.setRotation(2);   // OLED um 180 Grad drehen
 
   strip.begin();
   strip.setBrightness(255);

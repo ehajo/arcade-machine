@@ -1,4 +1,4 @@
-27119466954069678
+27123013494432796
 Audio_Module
 Reverb_BTDR-1H
 Digital Reverberation Unit, http://www.belton.co.kr/inc/downfile.php?seq=17&file=pdf (footprint from http://www.uk-electronic.de/PDF/BTDR-1.pdf)
@@ -107491,6 +107491,20 @@ Varistor VF
 0
 2
 2
+easyeda2kicad
+BAT-TH_BS-02-A1AJ010
+
+
+0
+2
+2
+easyeda2kicad
+SW-TH_6P-L5.8-W5.8-P2.00-LS4.5-BL
+
+
+0
+6
+6
 ehajo-footprints
 PinHeader_1x07_P1.27mm_Vertical_hand
 Through hole straight pin header, 1x07, 1.27mm pitch, single row
