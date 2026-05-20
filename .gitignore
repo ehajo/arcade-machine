@@ -7,3 +7,34 @@
 /Controller-Tennis/Software/build
 /Machine/Software/tennis
 Machine/PCB/arcade-pcb/.history/
+
+# Build-Ordner
+build/
+*/build/
+*/*/build/
+*/*/*/build/
+
+# Arduino / ESP32 Build-Artefakte
+*.bin
+*.elf
+*.map
+*.hex
+*.o
+*.a
+*.eep
+
+# Temporäre Dateien
+*.tmp
+*.bak
+*.log
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# PlatformIO, falls später genutzt
+.pio/
