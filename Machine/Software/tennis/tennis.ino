@@ -381,20 +381,20 @@ void setup() {
   display.setTextColor(SSD1306_WHITE);
   showBootScreen();
 
-  // STA-Mode (funktioniert fuer Empfang auf Machine)
+  // Reines ESP-NOW-Pairing: kein SoftAP, kein WLAN-Scan.
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(false, true);
   WiFi.setAutoReconnect(false);
   WiFi.setSleep(false);
-  delay(500);
+  delay(200);
 
   wifiTweak();
+  forcePairingChannel();
 
   // --- wireless init ---
-  esp_read_mac(g_mac, ESP_MAC_WIFI_STA);
-  Serial.printf("[ARCADE] STA MAC %02X:%02X:%02X:%02X:%02X:%02X\n",
-    g_mac[0],g_mac[1],g_mac[2],g_mac[3],g_mac[4],g_mac[5]);
-  Serial.printf("[ARCADE] WiFi.status=%d mode=%d\n", (int)WiFi.status(), (int)WiFi.getMode());
+  esp_wifi_get_mac(WIFI_IF_STA, g_mac);
+  Serial.printf("[ARCADE] MAC %02X:%02X:%02X:%02X:%02X:%02X channel=%u\n",
+    g_mac[0],g_mac[1],g_mac[2],g_mac[3],g_mac[4],g_mac[5], WIFI_CH);
 
   if (esp_now_init() != ESP_OK) {
     display.clearDisplay();
@@ -404,11 +404,12 @@ void setup() {
     while(true){ delay(1000); }
   }
   Serial.println("[ARCADE] ESP-NOW init OK");
+  forcePairingChannel();
 
-  // Channel NACH esp_now_init setzen
-  forceChannel1();
-
-  esp_now_register_recv_cb(onDataRecv);
+  esp_err_t recvCbErr = esp_now_register_recv_cb(onDataRecv);
+  if (recvCbErr != ESP_OK) {
+    Serial.printf("[ARCADE] esp_now_register_recv_cb failed: %d\n", (int)recvCbErr);
+  }
   Serial.println("[ARCADE] Tennis master boot");
   g_autoPairUntil = millis() + 20000; // 20s Auto-Pair Fenster nach Boot
   gs.mode = MODE_IDLE;
@@ -418,6 +419,7 @@ void setup() {
 void loop() {
   uint32_t now = millis();
   updateSound();
+  servicePairAck(now);
 
   // Auto-Pairing kurz nach Boot, solange noch kein Controller aktiv ist
   if (!ctrlPeerAdded && !g_pairing && (g_autoPairUntil != 0) && (now < g_autoPairUntil)) {
