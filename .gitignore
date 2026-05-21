@@ -23,6 +23,10 @@ build/
 *.a
 *.eep
 
+# Release-Binaries im binary-Ordner sind bewusst versioniert
+!binary/
+!binary/**
+
 # Temporäre Dateien
 *.tmp
 *.bak
